@@ -1,0 +1,356 @@
+---
+title: "Big Data Bowl"
+format: html
+editor: visual
+---
+
+## File Load
+
+```{r}
+tracking_data_wk1 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_1.csv")
+tracking_data_wk2 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_2.csv")
+tracking_data_wk3 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_3.csv")
+tracking_data_wk4 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_4.csv")
+tracking_data_wk5 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_5.csv")
+tracking_data_wk6 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_6.csv")
+tracking_data_wk7 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_7.csv")
+tracking_data_wk8 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_8.csv")
+tracking_data_wk9 <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/tracking_week_9.csv")
+```
+
+```{r}
+player_data <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/players.csv")
+game_data <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/games.csv")
+play_data <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/plays.csv")
+player_play_data <- read.csv("/Users/collinlabutte/Downloads/NFL Big Data Bowl 2025/Data/nfl-big-data-bowl-2025/player_play.csv")
+```
+
+The first 8 weeks of tracking will be used to predict the 9th week.
+
+Load the needed packages
+
+```{r}
+library(dplyr)
+library(xgboost)
+library(caret)
+```
+
+## Data Cleaning
+
+Join play data and filter for passing plays
+
+```{r}
+
+base_data <- player_play_data
+
+base_data <- base_data %>%
+  left_join(play_data , by = c("gameId", "playId"))
+```
+
+```{r}
+base_data <- base_data %>%
+  left_join(player_data %>% select(displayName, nflId, position), by = "nflId")
+```
+
+```{r}
+base_data <- base_data[base_data$position %in% c("WR"), ]
+```
+
+Only keep necessary variables:
+
+position, displayName, gameId, playId, nflId, teamAbbr, hadPassReception, receivingYards, wasTargettedReceiver,yardageGainedAfterTheCatch, inMotionAtBallSnap, shiftSinceLineset, motionSinceLineset, wasRunningRoute,routeRan, pff_defensiveCoverageAssignment, pff_primaryDefensiveCoverageMatchupNflId, playDescription, quarter,down, yardsToGo, defensiveTeam, yardlineSide, yardlineNumber, gameClock, absoluteYardlineNumber,playnullifiedByPenalty, offensiveFormation, receiverAlignment, passResult, passLength, targetX, targetY,passLocationTyoe, timeToThrow, pff_passCoverage, pff_manZone
+
+```{r}
+base_data <- base_data %>%
+  select(
+     gameId, playId, nflId, displayName, position, teamAbbr, hadPassReception, 
+    receivingYards, wasTargettedReceiver, yardageGainedAfterTheCatch, 
+    inMotionAtBallSnap, shiftSinceLineset, motionSinceLineset, wasRunningRoute, 
+    routeRan, pff_defensiveCoverageAssignment, pff_primaryDefensiveCoverageMatchupNflId,  playDescription, quarter, down, yardsToGo, defensiveTeam, yardlineSide, 
+    yardlineNumber, gameClock, absoluteYardlineNumber, playNullifiedByPenalty, 
+    offenseFormation, receiverAlignment, passResult, passLength, targetX, 
+    targetY, passLocationType, timeToThrow, pff_passCoverage, pff_manZone
+  )
+```
+
+## Data Processing
+
+```{r}
+
+route_labels <- levels(as.factor(base_data$routeRan))
+base_data$routeRan_encoded <- as.integer(as.factor(base_data$routeRan)) - 1
+
+# Create a data frame to store the mapping
+route_mapping <- data.frame(
+  Route = route_labels,
+  Encoded = seq_along(route_labels) - 1
+)
+
+base_data$man_zone <- ifelse(base_data$pff_manZone == "Man", 0, 
+                           ifelse(base_data$pff_manZone == "Zone", 1, NA))
+base_data$shift <- ifelse(base_data$shiftSinceLineset == "FALSE", 0, 
+                           ifelse(base_data$shiftSinceLineset == "TRUE", 1, NA))
+base_data$motion_snap <- ifelse(base_data$inMotionAtBallSnap == "FALSE", 0, 
+                           ifelse(base_data$inMotionAtBallSnap == "TRUE", 1, NA))
+base_data$motion <- ifelse(base_data$motionSinceLineset == "FALSE", 0, 
+                           ifelse(base_data$motionSinceLineset == "TRUE", 1, NA))
+base_data$receiver <- as.integer(as.factor(base_data$receiverAlignment)) - 1
+base_data$pass_coverage <- as.integer(as.factor(base_data$pff_passCoverage)) - 1
+```
+
+```{r}
+# Example: Convert "12:34" to total seconds
+base_data$game_clock_seconds <- sapply(base_data$gameClock, function(clock) {
+  if (!is.na(clock)) {
+    # Split the clock into minutes and seconds
+    time_parts <- strsplit(clock, ":")[[1]]
+    minutes <- as.integer(time_parts[1])  # Extract minutes
+    seconds <- as.integer(time_parts[2])  # Extract seconds
+    # Convert to total seconds
+    total_seconds <- minutes * 60 + seconds
+    return(total_seconds)
+  } else {
+    return(NA)  # Handle missing values
+  }
+})
+
+```
+
+Manipulate and filter tracking data
+
+```{r}
+wk1 <- tracking_data_wk1[tracking_data_wk1$frameType %in% c("SNAP"), ]
+wk2 <- tracking_data_wk2[tracking_data_wk2$frameType %in% c("SNAP"), ]
+wk3 <- tracking_data_wk3[tracking_data_wk3$frameType %in% c("SNAP"), ]
+wk4 <- tracking_data_wk4[tracking_data_wk4$frameType %in% c("SNAP"), ]
+wk5 <- tracking_data_wk5[tracking_data_wk5$frameType %in% c("SNAP"), ]
+wk6 <- tracking_data_wk6[tracking_data_wk6$frameType %in% c("SNAP"), ]
+wk7 <- tracking_data_wk7[tracking_data_wk7$frameType %in% c("SNAP"), ]
+wk8 <- tracking_data_wk8[tracking_data_wk8$frameType %in% c("SNAP"), ]
+wk9 <- tracking_data_wk9[tracking_data_wk9$frameType %in% c("SNAP"), ]
+```
+
+Left Joins tracking data
+
+```{r}
+# Combine all datasets into one
+tracking_binded_data <- rbind(wk1, wk2, wk3, wk4, wk5, wk6, wk7, wk8, wk9)
+
+base_data <- base_data %>%
+  left_join(tracking_binded_data %>% select(gameId, playId, nflId, y, x), 
+            by = c("gameId", "playId","nflId"))
+```
+
+```{r}
+# Keep only the specified variables
+data <- base_data[, c("routeRan_encoded", "man_zone", "absoluteYardlineNumber","shift", "motion_snap", "motion", "receiver","nflId","down","yardsToGo","pass_coverage","game_clock_seconds","gameId", "playId", "y", "x")]
+```
+
+```{r}
+data <- na.omit(data)
+set.seed(123)  # For reproducibility
+train_idx <- createDataPartition(data$routeRan_encoded, p = 0.8, list = FALSE)
+train_data <- data[train_idx, ]
+test_data <- data[-train_idx, ]
+```
+
+## XGBoost Model
+
+```{r}
+# Exclude target variable and any other variables you don't want in the model
+exclude_cols <- c("routeRan_encoded", "playId", "gameId")  # Add other variables to exclude if needed
+
+# Get the columns you want to keep in the feature matrix
+feature_cols <- setdiff(names(train_data), exclude_cols)
+
+# Create feature matrices for training and testing datasets
+train_x <- as.matrix(train_data[, feature_cols])
+train_y <- train_data$routeRan_encoded
+test_x <- as.matrix(test_data[, feature_cols])
+test_y <- test_data$routeRan_encoded
+```
+
+```{r}
+# Convert to DMatrix (XGBoost's preferred data structure)
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest <- xgb.DMatrix(data = test_x, label = test_y)
+
+# Set model parameters
+params <- list(
+  objective = "multi:softprob", # For classification
+  num_class = length(unique(train_y)), # Number of classes
+  eval_metric = "mlogloss"      # Evaluation metric
+)
+
+# Train the XGBoost model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100,  # Number of boosting rounds
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 10,  # Stop early if no improvement
+  verbose = 1
+)
+```
+
+Boosting Plot
+
+```{r}
+library(ggplot2)
+
+eval_log <- xgb_model$evaluation_log
+
+# Identify the best iteration
+best_iteration <- which.min(eval_log$test_mlogloss)
+
+# Plot training and test loss with best iteration line
+ggplot(eval_log, aes(x = iter)) +
+  geom_line(aes(y = train_mlogloss, color = "Training Loss")) +
+  geom_line(aes(y = test_mlogloss, color = "Test Loss")) +
+  geom_vline(xintercept = best_iteration, linetype = "dashed", color = "black", linewidth = 1) +
+  annotate(
+    "text",
+    x = best_iteration,
+    y = max(eval_log$test_mlogloss),
+    label = paste("Best Iteration:", best_iteration),
+    hjust = -0.1,
+    color = "black"
+  ) +
+  labs(
+    title = "Training and Test Loss Over Iterations",
+    x = "Boosting Rounds (Iterations)",
+    y = "Log Loss",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+
+## Prediction
+
+Prediction Test (Top 3 Routes)
+
+```{r}
+# Get predicted probabilities for each receiver in the test data
+pred_prob <- predict(xgb_model, newdata = dtest)
+
+# Reshape the prediction probabilities into a matrix (rows = receivers, columns = number of routes)
+num_classes <- length(unique(test_y))  # Number of routes (classes)
+pred_matrix <- matrix(pred_prob, ncol = num_classes, byrow = TRUE)
+
+# Extract gameId, playId, and nflId (receiver) for each row in the test data
+game_ids <- test_data$gameId
+play_ids <- test_data$playId
+receivers <- test_data$nflId  # Use nflId as receiver identifier
+
+# Function to get top N predictions (top 3)
+get_top_n_predictions <- function(row, n = 3) {
+  top_indices <- order(row, decreasing = TRUE)[1:n]  # Get the indices of the top n predictions
+  top_probs <- row[top_indices]  # Get the associated probabilities
+  return(data.frame(Route = top_indices - 1, Probability = top_probs))  # Adjust to 0-based indexing
+}
+
+# Create a data frame with top 3 predictions for each receiver
+library(dplyr)
+top_3_predictions <- bind_rows(lapply(seq_len(nrow(pred_matrix)), function(i) {
+  cbind(Observation = i, 
+        gameId = game_ids[i], 
+        playId = play_ids[i],
+        receiver = receivers[i],  # Replace with nflId as receiver
+        get_top_n_predictions(pred_matrix[i, ], n = 3))
+}))
+
+# View the result
+head(top_3_predictions)
+
+top_3_predictions <- top_3_predictions %>%
+  left_join(test_data %>% select(gameId, playId, nflId, routeRan_encoded), 
+            by = c("gameId", "playId", "receiver" = "nflId"))
+
+```
+
+Accuracy Measure
+
+```{r}
+top_3_predictions <- top_3_predictions %>%
+  mutate(route_match_flag = ifelse(Route == routeRan_encoded, 1, 0))
+
+accuracy <- sum(top_3_predictions$route_match_flag == 1, na.rm = TRUE) / (nrow(top_3_predictions) / 3)
+print(paste("Accuracy:", round(accuracy * 100, 2), "%"))
+```
+
+## Graphs
+
+Accuracy by Prediction Number
+
+```{r}
+top_3_predictions <- top_3_predictions %>%
+  group_by(Observation) %>%
+  mutate(rank = row_number()) %>%
+  ungroup()
+
+# Calculate percentage correct for each rank
+accuracy_by_rank <- top_3_predictions %>%
+  group_by(rank) %>%
+  summarize(
+    correct_count = sum(route_match_flag, na.rm = TRUE),
+    total_count = n(),
+    accuracy = correct_count / total_count * 100
+  )
+
+# Plot the accuracy for each rank
+ggplot(accuracy_by_rank, aes(x = factor(rank), y = accuracy, fill = factor(rank))) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(accuracy, 1), "%")), 
+            vjust = -0.5, size = 4) +  # Add labels above bars
+  labs(
+    title = "Accuracy by Route Prediction Rank",
+    x = "Prediction Rank",
+    y = "Accuracy (%)",
+    fill = "Prediction Rank"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(
+    values = c("lightblue", "royalblue", "darkblue"),
+    labels = c("1st predicted route", "2nd predicted route", "3rd predicted route")
+  )
+```
+
+Accuracy by Route Type
+
+```{r}
+success_by_route <- top_3_predictions %>%
+  group_by(routeRan_encoded) %>%
+  summarize(
+    correct_count = sum(route_match_flag, na.rm = TRUE),
+    total_count = n(),
+    success_rate = correct_count / total_count * 100
+  )
+
+success_by_route <- success_by_route %>%
+  left_join(route_mapping, by = c("routeRan_encoded" = "Encoded"))
+
+# Plot success rate by route name
+ggplot(success_by_route, aes(x = reorder(Route, success_rate), y = success_rate, fill = success_rate)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(success_rate, 1), "%")), 
+            vjust = -0.5, size = 3) +  # Add labels above bars
+  labs(
+    title = "Accuracy Rate by Route Type",
+    x = "Route Type",
+    y = "Accuracy (%)",
+    fill = "Accuracy Rate"
+  ) +
+  theme_minimal() +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Feature Importance
+
+```{r}
+importance_matrix <- xgb.importance(model = xgb_model)
+
+importance_plot <- xgb.plot.importance(importance_matrix, 
+                                       main = "Feature Importance in XGBoost Model", 
+                                       xlab = "Importance")
+```
